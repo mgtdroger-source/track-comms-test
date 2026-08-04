@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#123b66">
+<title>TD6 Tracking Transport Timing Test v0.10</title>
+<link rel="manifest" href="manifest.webmanifest">
+<style>
+:root{font-family:Arial,Helvetica,sans-serif;color:#17212b;background:#f3f6fa}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#f3f6fa}
+header{position:sticky;top:0;z-index:5;background:#123b66;color:#fff;padding:14px 16px;box-shadow:0 2px 8px rgba(0,0,0,.2)}
+.header-row{display:flex;justify-content:space-between;align-items:center;gap:10px}h1{font-size:19px;margin:0}.badge{font-size:12px;font-weight:800;background:#fee2e2;color:#991b1b;border-radius:999px;padding:5px 9px}
+main{max-width:900px;margin:0 auto;padding:14px}.card{background:#fff;border:1px solid #ccd6df;border-radius:13px;margin-bottom:13px;overflow:hidden;box-shadow:0 3px 14px rgba(0,0,0,.06)}
+.card h2{font-size:15px;margin:0;padding:11px 14px;background:#f8fafc;border-bottom:1px solid #d9e1e7}.content{padding:14px}
+.summary{display:grid;grid-template-columns:repeat(4,1fr);gap:9px}.stat{border:1px solid #d3dde5;border-radius:10px;padding:10px;background:#fbfcfd}.stat small{display:block;color:#60707d;font-size:11px;font-weight:700;text-transform:uppercase}.stat strong{display:block;font-size:22px;margin-top:5px}
+.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}.actions button{min-height:52px;border:0;border-radius:10px;font-size:16px;font-weight:800;cursor:pointer}.get{background:#177b43;color:#fff}.lean{background:#155f9b;color:#fff}.download{background:#e6edf4;color:#183247}.actions button:disabled{opacity:.45;cursor:default}
+.note{font-size:13px;color:#52616d;line-height:1.45;margin:10px 0 0}.status{font-weight:700;margin-bottom:10px}.good{color:#18703d}.warn{color:#a35b00}.bad{color:#a11b1b}
+.table-wrap{overflow:auto;border:1px solid #d3dde5;border-radius:10px}table{width:100%;border-collapse:collapse;min-width:1250px;font-size:12px}th,td{border-bottom:1px solid #e2e8ee;padding:8px 7px;text-align:left;vertical-align:top}th{background:#f1f5f8;position:sticky;top:0}.raw{max-width:320px;white-space:pre-wrap;overflow-wrap:anywhere}.ok{color:#18703d;font-weight:700}.fail{color:#a11b1b;font-weight:700}.pending{color:#9a5a00;font-weight:700}.method{font-weight:800}
+.footer{text-align:center;color:#60707d;font-size:12px;padding:2px 8px 18px}@media(max-width:700px){.summary{grid-template-columns:1fr 1fr}.actions{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header><div class="header-row"><h1>Tracking Transport Test</h1><span class="badge">TD6 TEST v0.10</span></div></header>
+<main>
+<section class="card"><h2>Purpose</h2><div class="content"><div id="status" class="status">Ready. Send 30 records and observe phone send, Google received and phone acknowledgement times.</div><div class="summary"><div class="stat"><small>Attempted</small><strong id="sent">0</strong></div><div class="stat"><small>Normal ack</small><strong id="normalCount">0</strong></div><div class="stat"><small>Confirmed</small><strong id="confirmCount">0</strong></div><div class="stat"><small>Retained</small><strong id="failed">0</strong></div><div class="stat"><small>Avg to Google</small><strong id="avgStore">—</strong></div><div class="stat"><small>Avg ack delay</small><strong id="avgAckDelay">—</strong></div><div class="stat"><small>Longest total</small><strong id="longest">—</strong></div><div class="stat"><small>Current</small><strong id="current">—</strong></div></div><p class="note">For each report the app records the phone send time, Google received time returned by Code.gs, phone acknowledgement time, estimated phone-to-Google time, Google-to-phone acknowledgement delay, total round trip, and whether normal submit or trackingConfirm completed the report. Submit is limited to 5 seconds; confirmation checks remain bounded and do not blindly resend.</p></div></section>
+<section class="card"><h2>Controls</h2><div class="content"><div class="actions"><button id="goBtn" class="get">Send 30 Timed Records</button><button id="downloadBtn" class="download" disabled>Download Timing Log</button></div></div></section>
+<section class="card"><h2>Live send and receive timing</h2><div class="content"><div class="table-wrap"><table><thead><tr><th>#</th><th>State</th><th>Phone send</th><th>Google received</th><th>Phone ack</th><th>To Google</th><th>Ack delay</th><th>Total</th><th>Route</th><th>Confirm checks</th><th>Raw response / error</th></tr></thead><tbody id="logBody"></tbody></table></div></div></section>
+</main><div class="footer">Fenced diagnostic app · no STC Recorder code</div>
+<script>
+(() => {
+'use strict';
+const VERSION='0.10';
+const ENDPOINT='https://script.google.com/macros/s/AKfycbxNFN8oyj8dRviX23CC7AZXlswCwF8_Eor5TDW-ZwM4eSo_VhR7bhuE1CSdR--odxRvvA/exec';
+const KEY='RALLY-TRACKING';
+const SUBMIT_TIMEOUT_MS=5000;
+const CONFIRM_TIMEOUT_MS=8000;
+const CONFIRM_ATTEMPTS=3;
+const CONFIRM_DELAY_MS=1500;
+const $=id=>document.getElementById(id);
+let rows=[];
+let running=false;
+const TEST_COUNT=30;
+function iso(){return new Date().toISOString()}
+function fmtClock(v){if(!v)return '—';const d=new Date(v);return Number.isNaN(d.getTime())?'—':d.toLocaleTimeString([], {hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit',fractionalSecondDigits:3});}
+function fmtMs(v){return Number.isFinite(v)?`${Math.round(v)} ms`:'—';}
+function sleep(ms){return new Promise(resolve=>setTimeout(resolve,ms))}
+async function fetchWithTimeout(url,options,timeoutMs){
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),timeoutMs);
+  try{return await fetch(url,{...options,signal:controller.signal})}
+  finally{clearTimeout(timer)}
+}
+function requestError(error,timeoutMs){
+  return error&&error.name==='AbortError'?`Timed out after ${timeoutMs} ms`:(error&&error.message?error.message:String(error));
+}
+function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function setStatus(text,cls=''){const el=$('status');el.textContent=text;el.className='status '+cls}
+function updateSummary(){
+  const attempted=rows.filter(r=>r.state!=='queued').length;
+  const normals=rows.filter(r=>r.confirmedBy==='submit response').length;
+  const confirms=rows.filter(r=>r.confirmedBy==='trackingConfirm').length;
+  const retained=rows.filter(r=>r.state==='retained').length;
+  const storeVals=rows.map(r=>r.phoneToGoogleMs).filter(Number.isFinite);
+  const ackVals=rows.map(r=>r.googleToPhoneAckMs).filter(Number.isFinite);
+  const totals=rows.map(r=>r.totalDurationMs).filter(Number.isFinite);
+  $('sent').textContent=attempted;
+  $('normalCount').textContent=normals;
+  $('confirmCount').textContent=confirms;
+  $('failed').textContent=retained;
+  $('avgStore').textContent=storeVals.length?fmtMs(storeVals.reduce((a,b)=>a+b,0)/storeVals.length):'—';
+  $('avgAckDelay').textContent=ackVals.length?fmtMs(ackVals.reduce((a,b)=>a+b,0)/ackVals.length):'—';
+  $('longest').textContent=totals.length?fmtMs(Math.max(...totals)):'—';
+  $('downloadBtn').disabled=!rows.length;
+}
+function render(){
+  $('logBody').innerHTML=rows.map(r=>{
+    const checks=(r.confirmChecks||[]).map(c=>`#${c.attempt}: ${c.httpStatus||'ERR'} · ${esc(c.outcome||'')} · ${fmtMs(c.durationMs)}`).join('<br>');
+    const route=r.confirmedBy==='submit response'?'Normal ack':r.confirmedBy==='trackingConfirm'?'trackingConfirm':r.state==='retained'?'Retained':'—';
+    return `<tr><td>${r.sequence}</td><td class="${r.state==='confirmed'?'ok':r.state==='retained'?'fail':'pending'}">${esc(r.state)}</td><td>${esc(fmtClock(r.phoneSendAt))}</td><td>${esc(fmtClock(r.googleReceivedAt))}</td><td>${esc(fmtClock(r.phoneAckAt))}</td><td>${esc(fmtMs(r.phoneToGoogleMs))}</td><td>${esc(fmtMs(r.googleToPhoneAckMs))}</td><td>${esc(fmtMs(r.totalDurationMs))}</td><td class="method">${esc(route)}</td><td class="raw">${checks}</td><td class="raw">${esc(r.rawResponse||r.error||r.submitFailure||'')}</td></tr>`;
+  }).join('');
+  updateSummary();
+}
+function makeReport(sequence,runId){
+  const gpsTime=new Date(Date.now()+sequence).toISOString();
+  return {
+    eventId:`TRANSPORT-CONFIRM-${runId}`,
+    rallyTitle:'TD6 Tracking Transport Test',
+    day:'Day 1',
+    route:'GET Confirmation Test',
+    rallyNo:'TEST',
+    driverName:'Transport Test',
+    latitude:-34.1182119+sequence*0.000001,
+    longitude:18.3825894+sequence*0.000001,
+    accuracy:5,
+    speedKph:0,
+    senderId:`TD6-CONFIRM-${runId}`,
+    sequence,
+    gpsTime,
+    eventType:'POSITION'
+  };
+}
+function reportKey(report){
+  return [report.eventId,report.senderId,String(report.sequence),new Date(report.gpsTime).toISOString()].join('|');
+}
+async function submitReport(report,row){
+  const started=performance.now();
+  row.phoneSendAt=iso();
+  const sendEpoch=Date.now();
+  const params=new URLSearchParams({mode:'trackingSubmit',key:KEY,data:JSON.stringify(report),_:String(Date.now())});
+  try{
+    const response=await fetchWithTimeout(`${ENDPOINT}?${params.toString()}`,{method:'GET',cache:'no-store'},SUBMIT_TIMEOUT_MS);
+    const text=await response.text();
+    row.phoneAckAt=iso();
+    const ackEpoch=Date.now();
+    row.submitDurationMs=Math.round(performance.now()-started);
+    row.submitHttpStatus=response.status;
+    row.submitResponseUrl=response.url;
+    row.rawResponse=text;
+    let data;
+    try{data=JSON.parse(text)}catch(err){return {confirmed:false,reason:`Submit invalid JSON: ${err.message}`}}
+    row.submitParsed=JSON.stringify(data);
+    if(data&&data.receivedTime){
+      row.googleReceivedAt=data.receivedTime;
+      const receivedEpoch=Date.parse(data.receivedTime);
+      if(Number.isFinite(receivedEpoch)){
+        row.phoneToGoogleMs=receivedEpoch-sendEpoch;
+        row.googleToPhoneAckMs=ackEpoch-receivedEpoch;
+      }
+    }
+    if(response.ok&&data&&data.ok===true&&(data.accepted===true||data.duplicate===true||data.stored===true)){
+      return {confirmed:true,by:'submit'};
+    }
+    return {confirmed:false,reason:data&&data.error?data.error:`Submit HTTP ${response.status}`};
+  }catch(error){
+    row.phoneAckAt=iso();
+    row.submitDurationMs=Math.round(performance.now()-started);
+    return {confirmed:false,reason:requestError(error,SUBMIT_TIMEOUT_MS)};
+  }
+}
+async function confirmReport(key,row){
+  row.confirmChecks=[];
+  for(let attempt=1;attempt<=CONFIRM_ATTEMPTS;attempt++){
+    if(attempt>1) await sleep(CONFIRM_DELAY_MS);
+    const started=performance.now();
+    const check={attempt,startedAt:iso()};
+    row.confirmChecks.push(check);
+    render();
+    try{
+      const params=new URLSearchParams({mode:'trackingConfirm',key:KEY,reportKey:key,_:String(Date.now())});
+      const response=await fetchWithTimeout(`${ENDPOINT}?${params.toString()}`,{method:'GET',cache:'no-store'},CONFIRM_TIMEOUT_MS);
+      const text=await response.text();
+      check.durationMs=Math.round(performance.now()-started);
+      check.httpStatus=response.status;
+      check.responseUrl=response.url;
+      check.rawResponse=text;
+      let data;
+      try{data=JSON.parse(text)}catch(err){check.outcome=`invalid JSON: ${err.message}`;render();continue;}
+      check.parsed=JSON.stringify(data);
+      if(response.ok&&data&&data.ok===true&&data.confirmed===true){check.outcome='confirmed';render();return true;}
+      if(response.ok&&data&&data.ok===true&&data.confirmed===false){check.outcome='not found';render();continue;}
+      check.outcome=data&&data.error?data.error:`HTTP ${response.status}`;
+    }catch(error){
+      check.durationMs=Math.round(performance.now()-started);
+      check.outcome=requestError(error,CONFIRM_TIMEOUT_MS);
+    }
+    render();
+  }
+  return false;
+}
+async function sendOne(report,row){
+  row.state='sending';row.startedAt=iso();row.report=report;row.reportKey=reportKey(report);$('current').textContent=String(report.sequence);render();
+  const totalStart=performance.now();
+  const submit=await submitReport(report,row);
+  if(submit.confirmed){row.state='confirmed';row.confirmedBy='submit response';row.totalDurationMs=Math.round(performance.now()-totalStart);render();return true;}
+  row.submitFailure=submit.reason;
+  setStatus(`Record ${report.sequence}: submit acknowledgement failed. Checking the stored Report Key…`,'warn');
+  const confirmed=await confirmReport(row.reportKey,row);
+  row.totalDurationMs=Math.round(performance.now()-totalStart);
+  if(confirmed){row.state='confirmed';row.confirmedBy='trackingConfirm';render();return true;}
+  row.state='retained';row.error=`Retained for later retry: not confirmed after submit plus ${CONFIRM_ATTEMPTS} checks. Submit: ${submit.reason}`;render();return false;
+}
+async function runTest(){
+  if(running)return;
+  running=true;rows=[];render();$('goBtn').disabled=true;$('downloadBtn').disabled=true;
+  const runId=new Date().toISOString().replace(/[-:.TZ]/g,'').slice(0,14);
+  for(let i=1;i<=TEST_COUNT;i++)rows.push({sequence:i,state:'queued',runId});render();
+  for(let i=0;i<rows.length;i++){
+    const row=rows[i];
+    setStatus(`Sending record ${row.sequence} of ${TEST_COUNT}. Waiting for submit response…`,'warn');
+    const ok=await sendOne(makeReport(row.sequence,runId),row);
+    if(!ok){setStatus(`Record ${row.sequence} retained for later retry. Continuing with the next queued report…`,'warn');}
+  }
+  const confirmed=rows.filter(r=>r.state==='confirmed').length;
+  const retained=rows.filter(r=>r.state==='retained').length;
+  $('current').textContent='—';
+  if(confirmed===TEST_COUNT)setStatus(`Complete: all ${TEST_COUNT} records confirmed one at a time.`,'good');
+  else setStatus(`Complete: ${confirmed} confirmed; ${retained} retained for later retry. All ${TEST_COUNT} were attempted.`,'warn');
+  running=false;$('goBtn').disabled=false;updateSummary();
+}
+function csvCell(v){const s=String(v??'');return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s}
+function downloadLog(){
+  const headers=['appVersion','runId','sequence','state','startedAt','phoneSendAt','googleReceivedAt','phoneAckAt','phoneToGoogleMs','googleToPhoneAckMs','reportKey','submitDurationMs','submitHttpStatus','submitResponseUrl','submitParsed','submitFailure','confirmedBy','totalDurationMs','confirmChecksJson','rawResponse','error','reportJson'];
+  const lines=[headers.join(',')];
+  rows.forEach(r=>lines.push(headers.map(h=>csvCell(h==='appVersion'?VERSION:h==='confirmChecksJson'?JSON.stringify(r.confirmChecks||[]):h==='reportJson'?JSON.stringify(r.report||{}):r[h])).join(',')));
+  const blob=new Blob([lines.join('\n')],{type:'text/csv;charset=utf-8'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`TD6_tracking_timing_test_${new Date().toISOString().replace(/[:.]/g,'-')}.csv`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+$('goBtn').addEventListener('click',runTest);$('downloadBtn').addEventListener('click',downloadLog);
+if('serviceWorker' in navigator)navigator.serviceWorker.register('./service-worker.js?v=0.08').catch(()=>{});
+render();
+})();
+</script>
+</body>
+</html>
